@@ -61,21 +61,16 @@ class ApifyService {
   async _startActorRun(profileUrls) {
     const url = `${APIFY_API_BASE}/acts/${this.actorId}/runs?token=${this.token}`;
     
-    // Try different input formats that various actors accept
+    // Format specifically for harvestapi/linkedin-profile-posts actor
     const input = {
-      // Format 1: startUrls array (most common)
-      startUrls: profileUrls.map(url => ({ url })),
-      
-      // Format 2: urls array (some actors use this)
-      urls: profileUrls,
-      
-      // Format 3: profileUrls array (specific actors)
-      profileUrls: profileUrls,
-      
-      // Limit results
-      resultsLimit: 3,
-      maxResults: 3,
-      postsPerProfile: 3
+      targetUrls: profileUrls, // Actor expects array of URL strings
+      maxPosts: 3,
+      maxComments: 0,
+      maxReactions: 0,
+      includeQuotePosts: true,
+      includeReposts: false,
+      scrapeComments: false,
+      scrapeReactions: false
     };
 
     const response = await axios.post(url, input, {
@@ -147,7 +142,8 @@ class ApifyService {
 
   _findMatchingUrl(item, requestedUrls) {
     // Try to find matching URL from item data
-    const itemUrl = item.url || item.profileUrl || item.linkedin_url;
+    // harvestapi returns 'profileUrl' field
+    const itemUrl = item.profileUrl || item.url || item.linkedin_url;
     
     if (!itemUrl) {
       return null;
@@ -178,15 +174,14 @@ class ApifyService {
   _extractPosts(item) {
     const posts = [];
     
-    // Different actors may return posts in different formats
-    // Adjust this based on your chosen Apify actor's output format
+    // harvestapi/linkedin-profile-posts returns posts in the 'posts' array
     const postsArray = item.posts || item.activities || item.recentPosts || [];
 
     for (const post of postsArray.slice(0, 3)) { // Only take first 3
       const postData = {
-        text: post.text || post.content || post.description || '',
-        post_url: post.url || post.postUrl || post.link || '',
-        post_date: this._parseDate(post.date || post.postedDate || post.timestamp)
+        text: post.text || post.content || post.description || post.body || '',
+        post_url: post.url || post.postUrl || post.link || post.shareUrl || '',
+        post_date: this._parseDate(post.postedAt || post.date || post.postedDate || post.timestamp || post.createdAt)
       };
 
       // Only include if we have text and URL
