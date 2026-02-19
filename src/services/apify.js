@@ -132,24 +132,58 @@ class ApifyService {
   _normalizeResults(rawResults, requestedUrls) {
     const normalized = [];
 
-    for (const item of rawResults) {
-      // Match the result to the requested URL
-      const linkedinUrl = this._findMatchingUrl(item, requestedUrls);
+    // harvestapi returns a flat array of posts, not profiles with posts
+    // Group posts by profile URL
+    const postsByProfile = {};
+    
+    for (const post of rawResults) {
+      // Extract profile URL from query or author data
+      const profileUrl = post.query?.targetUrl || 
+                        post.author?.linkedinUrl?.split('?')[0] ||
+                        null;
       
-      if (!linkedinUrl) {
-        logger.warn('Could not match Apify result to requested URL', { item });
+      if (!profileUrl) continue;
+      
+      if (!postsByProfile[profileUrl]) {
+        postsByProfile[profileUrl] = [];
+      }
+      
+      postsByProfile[profileUrl].push(post);
+    }
+
+    // Now create normalized results for each profile
+    for (const [profileUrl, posts] of Object.entries(postsByProfile)) {
+      // Find matching requested URL
+      const matchedUrl = this._findMatchingProfileUrl(profileUrl, requestedUrls);
+      
+      if (!matchedUrl) {
+        logger.warn('Could not match profile URL to requested URL', { profileUrl });
         continue;
       }
 
-      const posts = this._extractPosts(item);
+      const extractedPosts = this._extractPosts(posts);
 
       normalized.push({
-        linkedin_url: linkedinUrl,
-        posts
+        linkedin_url: matchedUrl,
+        posts: extractedPosts
       });
     }
 
     return normalized;
+  }
+
+  _findMatchingProfileUrl(profileUrl, requestedUrls) {
+    const normalizedProfile = this._normalizeLinkedInUrl(profileUrl);
+    
+    for (const requestedUrl of requestedUrls) {
+      const normalizedRequested = this._normalizeLinkedInUrl(requestedUrl);
+      
+      if (normalizedProfile === normalizedRequested) {
+        return requestedUrl; // Return original URL
+      }
+    }
+    
+    return null;
   }
 
   _findMatchingUrl(item, requestedUrls) {
@@ -186,14 +220,25 @@ class ApifyService {
   _extractPosts(item) {
     const posts = [];
     
-    // harvestapi/linkedin-profile-posts returns posts in the 'posts' array
-    const postsArray = item.posts || item.activities || item.recentPosts || [];
+    // harvestapi/linkedin-profile-posts returns posts directly in the array
+    // Each item IS a post, not a container with a posts array
+    const postsArray = Array.isArray(item) ? item : (item.posts || [item]);
 
     for (const post of postsArray.slice(0, 3)) { // Only take first 3
       const postData = {
-        text: post.text || post.content || post.description || post.body || '',
-        post_url: post.url || post.postUrl || post.link || post.shareUrl || '',
-        post_date: this._parseDate(post.postedAt || post.date || post.postedDate || post.timestamp || post.createdAt)
+        // harvestapi uses 'content' not 'text'
+        text: post.content || post.text || post.description || post.body || '',
+        // harvestapi uses 'linkedinUrl' not 'post_url'
+        post_url: post.linkedinUrl || post.url || post.postUrl || post.link || post.shareUrl || '',
+        // harvestapi uses nested 'postedAt.date'
+        post_date: this._parseDate(
+          post.postedAt?.date || 
+          post.postedAt?.timestamp || 
+          post.date || 
+          post.postedDate || 
+          post.timestamp || 
+          post.createdAt
+        )
       };
 
       // Only include if we have text and URL
