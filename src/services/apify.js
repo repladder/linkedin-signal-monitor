@@ -49,12 +49,12 @@ class ApifyService {
       
       return this._normalizeResults(results, profileUrls);
     } catch (error) {
-      // Log detailed error information
-      logger.error('Apify scan failed with details', {
-        error: error.message,
-        stack: error.stack,
-        response: error.response?.data,
+      // Log detailed error information in a way that actually shows up
+      console.error('❌ APIFY ERROR DETAILS:', {
+        message: error.message,
         status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
         actorId: this.actorId,
         retryCount
       });
