@@ -69,7 +69,9 @@ class ApifyService {
   }
 
   async _startActorRun(profileUrls) {
-    const url = `${APIFY_API_BASE}/acts/${this.actorId}/runs?token=${this.token}`;
+    // Apify API uses ~ instead of / in the endpoint URL
+    const actorIdForUrl = this.actorId.replace('/', '~');
+    const url = `${APIFY_API_BASE}/acts/${actorIdForUrl}/runs?token=${this.token}`;
     
     // Format specifically for harvestapi/linkedin-profile-posts actor
     const input = {
