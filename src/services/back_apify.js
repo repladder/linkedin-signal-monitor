@@ -61,21 +61,9 @@ class ApifyService {
   async _startActorRun(profileUrls) {
     const url = `${APIFY_API_BASE}/acts/${this.actorId}/runs?token=${this.token}`;
     
-    // Try different input formats that various actors accept
     const input = {
-      // Format 1: startUrls array (most common)
       startUrls: profileUrls.map(url => ({ url })),
-      
-      // Format 2: urls array (some actors use this)
-      urls: profileUrls,
-      
-      // Format 3: profileUrls array (specific actors)
-      profileUrls: profileUrls,
-      
-      // Limit results
-      resultsLimit: 3,
-      maxResults: 3,
-      postsPerProfile: 3
+      resultsLimit: 3 // Only get last 3 posts per profile
     };
 
     const response = await axios.post(url, input, {
