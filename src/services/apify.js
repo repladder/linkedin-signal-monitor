@@ -49,6 +49,16 @@ class ApifyService {
       
       return this._normalizeResults(results, profileUrls);
     } catch (error) {
+      // Log detailed error information
+      logger.error('Apify scan failed with details', {
+        error: error.message,
+        stack: error.stack,
+        response: error.response?.data,
+        status: error.response?.status,
+        actorId: this.actorId,
+        retryCount
+      });
+      
       if (retryCount < MAX_RETRIES) {
         logger.warn(`Apify scan attempt ${retryCount + 1} failed, retrying...`, { error: error.message });
         await this._sleep(5000); // Wait 5 seconds before retry
