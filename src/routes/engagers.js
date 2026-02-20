@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateApiKey } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
 const logger = require('../utils/logger');
 const engagersService = require('../services/engagers');
@@ -23,7 +23,7 @@ setInterval(() => {
 // POST /engagers/scan - Start a new engager scan
 router.post(
   '/scan',
-  authenticateToken,
+  authenticateApiKey,
   [
     body('post_url').trim().notEmpty().withMessage('Post URL is required'),
     body('post_url').matches(/linkedin\.com\/posts\//).withMessage('Must be a valid LinkedIn post URL'),
@@ -131,7 +131,7 @@ router.post(
 );
 
 // GET /engagers/scan/:id/status - Get scan status and progress
-router.get('/scan/:id/status', authenticateToken, async (req, res) => {
+router.get('/scan/:id/status', authenticateApiKey, async (req, res) => {
   try {
     const { id } = req.params;
     const scanData = scanResults.get(id);
@@ -167,7 +167,7 @@ router.get('/scan/:id/status', authenticateToken, async (req, res) => {
 });
 
 // GET /engagers/scan/:id/results - Get scan results (for display in UI)
-router.get('/scan/:id/results', authenticateToken, async (req, res) => {
+router.get('/scan/:id/results', authenticateApiKey, async (req, res) => {
   try {
     const { id } = req.params;
     const scanData = scanResults.get(id);
@@ -206,7 +206,7 @@ router.get('/scan/:id/results', authenticateToken, async (req, res) => {
 });
 
 // GET /engagers/scan/:id/download - Download CSV
-router.get('/scan/:id/download', authenticateToken, async (req, res) => {
+router.get('/scan/:id/download', authenticateApiKey, async (req, res) => {
   try {
     const { id } = req.params;
     const scanData = scanResults.get(id);
@@ -242,7 +242,7 @@ router.get('/scan/:id/download', authenticateToken, async (req, res) => {
 });
 
 // GET /engagers/scans - List recent scans (from current session)
-router.get('/scans', authenticateToken, async (req, res) => {
+router.get('/scans', authenticateApiKey, async (req, res) => {
   try {
     // Get all scans from memory (last hour)
     const scans = Array.from(scanResults.entries())
