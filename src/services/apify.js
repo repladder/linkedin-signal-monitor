@@ -286,7 +286,7 @@ class ApifyService {
       logger.info('Scraping post reactions', { postUrl, maxReactions });
 
       const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', {
-        postUrl,
+        post_urls: [postUrl],
         maxReactions,
         reactionTypes: ['LIKE', 'PRAISE', 'EMPATHY', 'APPRECIATION', 'INTEREST']
       });
