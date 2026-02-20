@@ -12,6 +12,7 @@ const profilesRouter = require('./routes/profiles');
 const eventsRouter = require('./routes/events');
 const billingRouter = require('./routes/billing');
 const webhookRouter = require('./routes/webhook');
+const campaignsRouter = require('./routes/campaigns');
 
 // Initialize Express
 const app = express();
@@ -67,6 +68,7 @@ app.get('/', (req, res) => {
 });
 
 // Mount routes
+app.use('/campaigns', campaignsRouter);
 app.use('/profiles', profilesRouter);
 app.use('/events', eventsRouter);
 app.use('/billing', billingRouter); // Billing endpoints including create-subscription
