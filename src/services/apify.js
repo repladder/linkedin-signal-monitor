@@ -265,6 +265,112 @@ class ApifyService {
   _sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+
+  async _runActor(actorId, input) {
+    const actorIdForUrl = actorId.replace('/', '~');
+    const url = `${APIFY_API_BASE}/acts/${actorIdForUrl}/runs?token=${this.token}`;
+
+    const response = await axios.post(url, input, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const runId = response.data.data.id;
+    logger.info('Actor run started', { actorId, runId });
+
+    const runResult = await this._pollRunStatus(runId);
+    return await this._fetchDataset(runResult.defaultDatasetId);
+  }
+
+  async scrapePostReactions(postUrl, maxReactions = 100) {
+    try {
+      logger.info('Scraping post reactions', { postUrl, maxReactions });
+
+      const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', {
+        postUrl,
+        maxReactions,
+        reactionTypes: ['LIKE', 'PRAISE', 'EMPATHY', 'APPRECIATION', 'INTEREST']
+      });
+
+      logger.info('Post reactions scraped', { count: items.length, postUrl });
+
+      return items.map(item => ({
+        profileUrl: item.profileUrl || item.profileLink || item.url,
+        reactionType: this._mapReactionType(item.reactionType || item.reaction)
+      }));
+
+    } catch (error) {
+      logger.error('Error scraping post reactions', { error: error.message, postUrl });
+      throw new Error(`Failed to scrape reactions: ${error.message}`);
+    }
+  }
+
+  async scrapePostComments(postUrl, maxComments = 100) {
+    try {
+      logger.info('Scraping post comments', { postUrl, maxComments });
+
+      const items = await this._runActor('harvestapi/linkedin-post-comments', {
+        startUrls: [{ url: postUrl }],
+        maxComments
+      });
+
+      logger.info('Post comments scraped', { count: items.length, postUrl });
+
+      return items.map(item => ({
+        authorProfileUrl: item.authorProfileUrl || item.profileUrl,
+        text: item.text || item.commentText || '',
+        timestamp: item.timestamp || item.postedAt
+      }));
+
+    } catch (error) {
+      logger.error('Error scraping post comments', { error: error.message, postUrl });
+      throw new Error(`Failed to scrape comments: ${error.message}`);
+    }
+  }
+
+  async enrichProfile(profileUrl) {
+    try {
+      logger.info('Enriching profile', { profileUrl });
+
+      const items = await this._runActor('harvestapi/linkedin-profile-scraper', {
+        startUrls: [{ url: profileUrl }],
+        includeExperience: false,
+        includeEducation: false,
+        includeSkills: false
+      });
+
+      if (items.length === 0) {
+        throw new Error('No profile data returned');
+      }
+
+      const profile = items[0];
+      logger.info('Profile enriched', { profileUrl, name: profile.fullName });
+
+      return {
+        fullName: profile.fullName || profile.name || 'Unknown',
+        headline: profile.headline || profile.title || '',
+        company: profile.company || profile.currentCompany || '',
+        location: profile.location || profile.geo || ''
+      };
+
+    } catch (error) {
+      logger.error('Error enriching profile', { error: error.message, profileUrl });
+      throw new Error(`Failed to enrich profile: ${error.message}`);
+    }
+  }
+
+  _mapReactionType(reactionType) {
+    const mapping = {
+      'LIKE': 'Like',
+      'PRAISE': 'Love',
+      'EMPATHY': 'Insightful',
+      'APPRECIATION': 'Celebrate',
+      'INTEREST': 'Curious',
+      'SUPPORT': 'Support'
+    };
+
+    const upper = String(reactionType).toUpperCase();
+    return mapping[upper] || reactionType;
+  }
 }
 
 module.exports = new ApifyService();
