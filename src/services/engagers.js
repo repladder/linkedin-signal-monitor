@@ -3,25 +3,32 @@ const logger = require('../utils/logger');
 
 class EngagersService {
   /**
-   * Scan post engagers and FULLY enrich their profiles
-   * Uses ONLY 3 Apify actors - no separate company enrichment needed!
+   * HYBRID APPROACH: Profile + Selective Company Enrichment
+   * - Enriches ALL profiles (person data)
+   * - Only enriches companies when profile has company URL
+   * - Optimized with parallel batch processing
    * 
    * @param {string} postUrl - LinkedIn post URL
-   * @param {string[]} engagementTypes - Array of engagement types to scrape
-   * @param {number} limitPerType - Max engagers to scrape per type
+   * @param {string[]} engagementTypes - Array of engagement types
+   * @param {number} limitPerType - Max engagers per type
    * @param {function} onProgress - Progress callback
-   * @returns {object} { engagers: [], uniqueProfiles: number, csv: string }
+   * @returns {object} Complete enriched data
    */
   async scanPostEngagers(postUrl, engagementTypes, limitPerType, onProgress) {
-    logger.info('Starting full enrichment scan (simplified)', { postUrl, engagementTypes, limitPerType });
+    logger.info('Starting HYBRID enrichment scan', { postUrl, engagementTypes, limitPerType });
 
     const allEngagers = [];
     let reactionsScraped = 0;
     let commentsScraped = 0;
     let profilesEnriched = 0;
+    let companiesEnriched = 0;
 
     try {
-      // Step 1: Scrape reactions if requested
+      // ==========================================
+      // PHASE 1: SCRAPE ENGAGEMENTS (Fast - 1 min)
+      // ==========================================
+
+      // Step 1A: Scrape reactions
       const reactionTypes = engagementTypes.filter(t => t !== 'comment');
       
       if (reactionTypes.length > 0) {
@@ -40,13 +47,14 @@ class EngagersService {
           reactions_scraped: reactionsScraped,
           comments_scraped: 0,
           profiles_enriched: 0,
+          companies_enriched: 0,
           total: reactionsScraped
         });
 
         logger.info('Reactions scraped', { count: reactionsScraped });
       }
 
-      // Step 2: Scrape comments if requested
+      // Step 1B: Scrape comments
       if (engagementTypes.includes('comment')) {
         logger.info('Scraping comments', { limit: limitPerType });
         
@@ -63,13 +71,14 @@ class EngagersService {
           reactions_scraped: reactionsScraped,
           comments_scraped: commentsScraped,
           profiles_enriched: 0,
+          companies_enriched: 0,
           total: reactionsScraped + commentsScraped
         });
 
         logger.info('Comments scraped', { count: commentsScraped });
       }
 
-      // Step 3: Deduplicate by profile URL
+      // Step 1C: Deduplicate
       const uniqueEngagers = this._deduplicateEngagers(allEngagers);
       logger.info('Deduplicated engagers', { 
         total: allEngagers.length,
@@ -77,94 +86,202 @@ class EngagersService {
         duplicates: allEngagers.length - uniqueEngagers.length
       });
 
-      // Step 4: ENRICH ALL PROFILES (includes company data!)
-      const engagersToEnrich = uniqueEngagers.slice(0, limitPerType);
-      const fullyEnrichedEngagers = [];
+      // ==========================================
+      // PHASE 2: ENRICH PROFILES (Parallel - 1.5 min)
+      // ==========================================
 
-      for (let i = 0; i < engagersToEnrich.length; i++) {
-        const engager = engagersToEnrich[i];
-        
-        try {
-          logger.info(`Enriching profile ${i + 1}/${engagersToEnrich.length}`, { 
-            profileUrl: engager.linkedin_url 
+      const engagersToEnrich = uniqueEngagers.slice(0, limitPerType);
+      const profileEnrichedData = [];
+
+      const BATCH_SIZE = 10;
+      const DELAY_BETWEEN_BATCHES = 2000;
+
+      logger.info('Starting PARALLEL profile enrichment', {
+        totalProfiles: engagersToEnrich.length,
+        batchSize: BATCH_SIZE
+      });
+
+      const profileBatches = this._chunkArray(engagersToEnrich, BATCH_SIZE);
+
+      for (let batchIndex = 0; batchIndex < profileBatches.length; batchIndex++) {
+        const batch = profileBatches[batchIndex];
+
+        const batchPromises = batch.map(async (engager) => {
+          try {
+            const enrichedData = await apifyService.enrichProfile(engager.linkedin_url);
+            
+            return {
+              success: true,
+              engager: engager,
+              profileData: enrichedData
+            };
+          } catch (error) {
+            logger.error('Error enriching profile', {
+              profileUrl: engager.linkedin_url,
+              error: error.message
+            });
+            
+            return {
+              success: false,
+              engager: engager,
+              profileData: null
+            };
+          }
+        });
+
+        const batchResults = await Promise.allSettled(batchPromises);
+
+        batchResults.forEach((result) => {
+          if (result.status === 'fulfilled' && result.value.success) {
+            profileEnrichedData.push(result.value);
+            profilesEnriched++;
+          }
+        });
+
+        onProgress?.({
+          reactions_scraped: reactionsScraped,
+          comments_scraped: commentsScraped,
+          profiles_enriched: profilesEnriched,
+          companies_enriched: 0,
+          total: reactionsScraped + commentsScraped
+        });
+
+        if (batchIndex < profileBatches.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+        }
+      }
+
+      logger.info('Profile enrichment complete', { 
+        profilesEnriched,
+        total: engagersToEnrich.length 
+      });
+
+      // ==========================================
+      // PHASE 3: SELECTIVE COMPANY ENRICHMENT (Parallel - 1 min)
+      // ==========================================
+
+      // Extract unique companies that need enrichment
+      const uniqueCompanies = this._extractUniqueCompanies(profileEnrichedData);
+      
+      logger.info('Starting SELECTIVE company enrichment', {
+        totalCompanies: uniqueCompanies.length,
+        profilesWithCompany: profileEnrichedData.filter(p => p.profileData?.needsCompanyEnrichment).length
+      });
+
+      const companyDataMap = new Map();  // companyUrl → company data
+
+      if (uniqueCompanies.length > 0) {
+        const companyBatches = this._chunkArray(uniqueCompanies, BATCH_SIZE);
+
+        for (let batchIndex = 0; batchIndex < companyBatches.length; batchIndex++) {
+          const batch = companyBatches[batchIndex];
+
+          const batchPromises = batch.map(async (companyUrl) => {
+            try {
+              const companyData = await apifyService.enrichCompany(companyUrl);
+              return {
+                success: true,
+                companyUrl,
+                companyData
+              };
+            } catch (error) {
+              logger.error('Error enriching company', {
+                companyUrl,
+                error: error.message
+              });
+              return {
+                success: false,
+                companyUrl,
+                companyData: null
+              };
+            }
           });
 
-          // ONE API CALL gets ALL data (profile + company)
-          const enrichedData = await apifyService.enrichProfile(engager.linkedin_url);
-          profilesEnriched++;
+          const batchResults = await Promise.allSettled(batchPromises);
+
+          batchResults.forEach((result) => {
+            if (result.status === 'fulfilled' && result.value.success) {
+              companyDataMap.set(result.value.companyUrl, result.value.companyData);
+              companiesEnriched++;
+            }
+          });
 
           onProgress?.({
             reactions_scraped: reactionsScraped,
             comments_scraped: commentsScraped,
             profiles_enriched: profilesEnriched,
+            companies_enriched: companiesEnriched,
             total: reactionsScraped + commentsScraped
           });
 
-          // All 10 fields from single enrichment
-          fullyEnrichedEngagers.push({
-            // Personal Data (6 fields)
-            name: enrichedData.fullName || 'Unknown',
-            job_title: enrichedData.jobTitle || '',
-            location: enrichedData.location || '',
-            linkedin_url: enrichedData.linkedinUrl || engager.linkedin_url,
-            total_connections: enrichedData.connectionsCount || 0,
-            follower_count: enrichedData.followerCount || 0,
-            
-            // Company Data (4 fields)
-            company_name: enrichedData.companyName || '',
-            industry: enrichedData.industry || '',
-            employee_size: enrichedData.employeeSize || '',
-            company_profile_url: enrichedData.companyLinkedinUrl || '',
-            
-            // Engagement Data
-            reaction_type: engager.reaction_type,
-            comment_text: engager.comment_text || null
-          });
-
-          // Rate limiting - 2 second delay between enrichments
-          if (i < engagersToEnrich.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+          if (batchIndex < companyBatches.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
           }
-
-        } catch (error) {
-          logger.error('Error enriching engager', {
-            profileUrl: engager.linkedin_url,
-            error: error.message
-          });
-
-          // Add with minimal data if enrichment fails
-          fullyEnrichedEngagers.push({
-            name: 'Unknown',
-            job_title: '',
-            location: '',
-            linkedin_url: engager.linkedin_url,
-            total_connections: 0,
-            follower_count: 0,
-            company_name: '',
-            industry: '',
-            employee_size: '',
-            company_profile_url: '',
-            reaction_type: engager.reaction_type,
-            comment_text: engager.comment_text || null
-          });
-
-          profilesEnriched++;
         }
       }
 
-      // Step 5: Generate CSV with ALL 10 fields
+      logger.info('Company enrichment complete', {
+        companiesEnriched,
+        total: uniqueCompanies.length
+      });
+
+      // ==========================================
+      // PHASE 4: COMBINE ALL DATA
+      // ==========================================
+
+      const fullyEnrichedEngagers = profileEnrichedData.map(({ engager, profileData }) => {
+        // Get company data if available
+        let companyData = {
+          industry: '',
+          employeeSize: '',
+          companyLocation: ''
+        };
+
+        if (profileData?.needsCompanyEnrichment && profileData.companyLinkedinUrl) {
+          const enrichedCompany = companyDataMap.get(profileData.companyLinkedinUrl);
+          if (enrichedCompany) {
+            companyData = enrichedCompany;
+          }
+        }
+
+        return {
+          // Personal Data (6 fields)
+          name: profileData?.fullName || 'Unknown',
+          job_title: profileData?.jobTitle || '',
+          location: profileData?.location || '',
+          linkedin_url: profileData?.linkedinUrl || engager.linkedin_url,
+          total_connections: profileData?.connectionsCount || 0,
+          follower_count: profileData?.followerCount || 0,
+          
+          // Company Data (5 fields) ← NOW INCLUDING COMPANY LOCATION
+          company_name: profileData?.companyName || '',
+          industry: companyData.industry || '',
+          employee_size: companyData.employeeSize || '',
+          company_location: companyData.companyLocation || '',  // NEW!
+          company_profile_url: profileData?.companyLinkedinUrl || '',
+          
+          // Engagement Data
+          reaction_type: engager.reaction_type,
+          comment_text: engager.comment_text || null
+        };
+      });
+
+      // Step 5: Generate CSV
       const csv = this._generateCSV(fullyEnrichedEngagers);
 
-      logger.info('Full enrichment scan completed', {
+      logger.info('HYBRID enrichment scan completed', {
         totalEngagers: fullyEnrichedEngagers.length,
         uniqueProfiles: uniqueEngagers.length,
-        profilesEnriched: profilesEnriched
+        profilesEnriched: profilesEnriched,
+        companiesEnriched: companiesEnriched,
+        successRate: `${Math.round((profilesEnriched / engagersToEnrich.length) * 100)}%`
       });
 
       return {
         engagers: fullyEnrichedEngagers,
         uniqueProfiles: uniqueEngagers.length,
         profilesEnriched: profilesEnriched,
+        companiesEnriched: companiesEnriched,
         csv
       };
 
@@ -178,14 +295,40 @@ class EngagersService {
   }
 
   /**
+   * Extract unique company URLs that need enrichment
+   * @private
+   */
+  _extractUniqueCompanies(profileEnrichedData) {
+    const companyUrls = new Set();
+    
+    profileEnrichedData.forEach(({ profileData }) => {
+      if (profileData?.needsCompanyEnrichment && profileData.companyLinkedinUrl) {
+        companyUrls.add(profileData.companyLinkedinUrl);
+      }
+    });
+
+    return Array.from(companyUrls);
+  }
+
+  /**
+   * Split array into chunks
+   * @private
+   */
+  _chunkArray(array, chunkSize) {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+      chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
+  }
+
+  /**
    * Deduplicate engagers by LinkedIn URL
-   * If same person has multiple reactions, merge them
    */
   _deduplicateEngagers(engagers) {
     const seen = new Map();
 
     for (const engager of engagers) {
-      // Normalize URL (remove query params, trailing slash)
       const normalizedUrl = engager.linkedin_url
         .split('?')[0]
         .replace(/\/$/, '')
@@ -195,10 +338,9 @@ class EngagersService {
       if (!seen.has(normalizedUrl)) {
         seen.set(normalizedUrl, {
           ...engager,
-          linkedin_url: engager.linkedin_url // Keep original URL
+          linkedin_url: engager.linkedin_url
         });
       } else {
-        // Merge reaction types
         const existing = seen.get(normalizedUrl);
         const existingTypes = existing.reaction_type.split(', ');
         
@@ -206,7 +348,6 @@ class EngagersService {
           existing.reaction_type = [...existingTypes, engager.reaction_type].join(', ');
         }
         
-        // Keep comment text if exists
         if (engager.comment_text && !existing.comment_text) {
           existing.comment_text = engager.comment_text;
         }
@@ -217,7 +358,7 @@ class EngagersService {
   }
 
   /**
-   * Generate CSV with ALL 10 fields for outbound prospecting
+   * Generate CSV with ALL 11 fields (added company location)
    */
   _generateCSV(engagers) {
     const headers = [
@@ -230,6 +371,7 @@ class EngagersService {
       'Follower Count',
       'Company Name',
       'Employee Size',
+      'Company Location',  // NEW!
       'Company Profile URL',
       'Reaction Type'
     ];
@@ -244,6 +386,7 @@ class EngagersService {
       e.follower_count || 0,
       this._escapeCsvValue(e.company_name),
       this._escapeCsvValue(e.employee_size),
+      this._escapeCsvValue(e.company_location),  // NEW!
       e.company_profile_url || '',
       this._escapeCsvValue(e.reaction_type)
     ]);
@@ -257,14 +400,13 @@ class EngagersService {
   }
 
   /**
-   * Escape CSV values (handle commas, quotes, newlines)
+   * Escape CSV values
    */
   _escapeCsvValue(value) {
     if (!value) return '';
     
     const stringValue = String(value);
     
-    // If value contains comma, quote, or newline, wrap in quotes and escape quotes
     if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
       return `"${stringValue.replace(/"/g, '""')}"`;
     }

@@ -331,7 +331,7 @@ class ApifyService {
 
   async enrichProfile(profileUrl) {
     try {
-      logger.info('Enriching profile with full data', { profileUrl });
+      logger.info('Enriching profile', { profileUrl });
 
       const items = await this._runActor('harvestapi/linkedin-profile-scraper', {
         profileScraperMode: 'Profile details no email ($4 per 1k)',
@@ -358,28 +358,20 @@ class ApifyService {
 
       let companyName = '';
       let companyUrl = '';
-      let industry = '';
-      let employeeSize = '';
+      let companyId = null;
 
       if (profile.currentPosition && profile.currentPosition.length > 0) {
         const currentPos = profile.currentPosition[0];
         companyName = currentPos.companyName || '';
         companyUrl = currentPos.companyLinkedinUrl || '';
-        industry = currentPos.industry || '';
+        companyId = currentPos.companyId || null;
       }
 
-      if (profile.company) {
-        employeeSize = profile.company.staffCount || profile.company.employeeCount || '';
-      }
-
-      if (employeeSize && !isNaN(employeeSize)) {
-        employeeSize = this._formatEmployeeCount(parseInt(employeeSize));
-      }
-
-      logger.info('Profile enriched successfully', {
+      logger.info('Profile enriched', {
         profileUrl,
         name: `${profile.firstName} ${profile.lastName}`,
-        company: companyName
+        company: companyName,
+        hasCompanyUrl: !!companyUrl
       });
 
       return {
@@ -390,9 +382,9 @@ class ApifyService {
         connectionsCount: profile.connectionsCount || 0,
         followerCount: profile.followerCount || 0,
         companyName,
-        industry,
-        employeeSize,
-        companyLinkedinUrl: companyUrl
+        companyLinkedinUrl: companyUrl,
+        companyId,
+        needsCompanyEnrichment: !!companyUrl
       };
 
     } catch (error) {
@@ -406,11 +398,80 @@ class ApifyService {
         connectionsCount: 0,
         followerCount: 0,
         companyName: '',
-        industry: '',
-        employeeSize: '',
-        companyLinkedinUrl: ''
+        companyLinkedinUrl: '',
+        companyId: null,
+        needsCompanyEnrichment: false
       };
     }
+  }
+
+  async enrichCompany(companyUrl) {
+    try {
+      logger.info('Enriching company', { companyUrl });
+
+      const items = await this._runActor('harvestapi/linkedin-company-scraper', {
+        companiesUrls: [companyUrl]
+      });
+
+      if (items.length === 0) {
+        logger.warn('No company data returned', { companyUrl });
+        return this._getCompanyFallback();
+      }
+
+      const company = items[0];
+
+      let employeeSize = '';
+      if (company.staffCount) {
+        employeeSize = company.staffCount;
+      } else if (company.employeeCount) {
+        employeeSize = this._formatEmployeeCount(company.employeeCount);
+      } else if (company.companySize) {
+        employeeSize = company.companySize;
+      }
+
+      let companyLocation = '';
+      if (company.headquarters) {
+        const hq = company.headquarters;
+        if (hq.city && hq.state) {
+          companyLocation = `${hq.city}, ${hq.state}`;
+        } else if (hq.city && hq.country) {
+          companyLocation = `${hq.city}, ${hq.country}`;
+        } else if (hq.city) {
+          companyLocation = hq.city;
+        }
+      } else if (company.location) {
+        companyLocation = company.location;
+      }
+
+      logger.info('Company enriched', {
+        companyUrl,
+        name: company.name,
+        industry: company.industry,
+        location: companyLocation
+      });
+
+      return {
+        industry: company.industry || company.industries?.[0] || '',
+        employeeSize,
+        companyLocation,
+        companyName: company.name || '',
+        companyLinkedinUrl: company.linkedinUrl || companyUrl
+      };
+
+    } catch (error) {
+      logger.error('Error enriching company', { error: error.message, stack: error.stack, companyUrl });
+      return this._getCompanyFallback();
+    }
+  }
+
+  _getCompanyFallback() {
+    return {
+      industry: '',
+      employeeSize: '',
+      companyLocation: '',
+      companyName: '',
+      companyLinkedinUrl: ''
+    };
   }
 
   _formatEmployeeCount(count) {
