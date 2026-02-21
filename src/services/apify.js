@@ -360,9 +360,9 @@ class ApifyService {
         logger.info('Extracted company from experience', {
           companyName,
           companyUrl,
-          format: companyUrl.includes('/company/')
-            ? (companyUrl.match(/\/company\/([^\/]+)/)?.[1]?.match(/^\d+$/) ? 'ID' : 'SLUG')
-            : 'UNKNOWN'
+          urlFormat: companyUrl.includes('/company/')
+            ? (companyUrl.match(/\/company\/([^\/]+)/)?.[1] || 'unknown')
+            : 'no-url'
         });
       }
       // FALLBACK: currentPosition may have numeric ID instead of slug
@@ -373,7 +373,7 @@ class ApifyService {
         companyUrl = currentPos.companyLinkedinUrl || '';
         companyId = currentPos.companyId || null;
 
-        logger.warn('Using currentPosition fallback (may have ID instead of slug)', {
+        logger.warn('Using currentPosition (may have numeric ID)', {
           companyName,
           companyUrl
         });
@@ -394,13 +394,12 @@ class ApifyService {
         companyUrl.includes('/company/') &&
         !companyUrl.match(/\/company\/\d+\/?$/);
 
-      logger.info('Profile enriched', {
+      logger.info('Profile enrichment complete', {
         profileUrl,
         name: `${profile.firstName} ${profile.lastName}`,
         company: companyName,
-        hasCompanyUrl: !!companyUrl,
-        companyUrlFormat: hasValidCompanyUrl ? 'SLUG' : 'ID_OR_MISSING',
-        willEnrichCompany: hasValidCompanyUrl
+        companyUrl,
+        hasValidUrl: hasValidCompanyUrl
       });
 
       return {
@@ -438,8 +437,10 @@ class ApifyService {
     try {
       logger.info('Enriching company', { companyUrl });
 
+      logger.info('Company enrichment input', { companies: [companyUrl], companyUrl });
+
       const items = await this._runActor('harvestapi/linkedin-company', {
-        companiesUrls: [companyUrl]
+        companies: [companyUrl]
       });
 
       if (items.length === 0) {
