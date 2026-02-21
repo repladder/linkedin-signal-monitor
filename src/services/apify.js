@@ -286,20 +286,20 @@ class ApifyService {
       logger.info('Scraping post reactions', { postUrl, maxReactions });
 
       const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', {
+        max_reactions: maxReactions,
         post_urls: [postUrl],
-        maxReactions,
-        reactionTypes: ['LIKE', 'PRAISE', 'EMPATHY', 'APPRECIATION', 'INTEREST']
+        reaction_type: 'ALL'
       });
 
       logger.info('Post reactions scraped', { count: items.length, postUrl });
 
       return items.map(item => ({
-        profileUrl: item.profileUrl || item.profileLink || item.url,
-        reactionType: this._mapReactionType(item.reactionType || item.reaction)
+        profileUrl: item.reactor?.profile_url || item.reactor_profile_url,
+        reactionType: this._mapReactionType(item.reaction_type)
       }));
 
     } catch (error) {
-      logger.error('Error scraping post reactions', { error: error.message, postUrl });
+      logger.error('Error scraping post reactions', { error: error.message, stack: error.stack, postUrl });
       throw new Error(`Failed to scrape reactions: ${error.message}`);
     }
   }
@@ -309,33 +309,33 @@ class ApifyService {
       logger.info('Scraping post comments', { postUrl, maxComments });
 
       const items = await this._runActor('harvestapi/linkedin-post-comments', {
-        startUrls: [{ url: postUrl }],
-        maxComments
+        maxItems: maxComments,
+        postedLimit: '3months',
+        posts: [postUrl],
+        profileScraperMode: 'short',
+        scrapeReplies: false
       });
 
       logger.info('Post comments scraped', { count: items.length, postUrl });
 
       return items.map(item => ({
-        authorProfileUrl: item.authorProfileUrl || item.profileUrl,
-        text: item.text || item.commentText || '',
-        timestamp: item.timestamp || item.postedAt
+        profileUrl: item.actor?.linkedinUrl || '',
+        commentText: item.commentary || ''
       }));
 
     } catch (error) {
-      logger.error('Error scraping post comments', { error: error.message, postUrl });
+      logger.error('Error scraping post comments', { error: error.message, stack: error.stack, postUrl });
       throw new Error(`Failed to scrape comments: ${error.message}`);
     }
   }
 
   async enrichProfile(profileUrl) {
     try {
-      logger.info('Enriching profile', { profileUrl });
+      logger.info('Enriching profile with full data', { profileUrl });
 
       const items = await this._runActor('harvestapi/linkedin-profile-scraper', {
-        startUrls: [{ url: profileUrl }],
-        includeExperience: false,
-        includeEducation: false,
-        includeSkills: false
+        profileScraperMode: 'Profile details no email ($4 per 1k)',
+        queries: [profileUrl]
       });
 
       if (items.length === 0) {
@@ -343,31 +343,101 @@ class ApifyService {
       }
 
       const profile = items[0];
-      logger.info('Profile enriched', { profileUrl, name: profile.fullName });
+
+      let jobTitle = '';
+      if (profile.experience && profile.experience.length > 0) {
+        jobTitle = profile.experience[0].position || profile.headline || '';
+      } else {
+        jobTitle = profile.headline || '';
+      }
+
+      let location = '';
+      if (profile.location) {
+        location = profile.location.parsed?.text || profile.location.linkedinText || '';
+      }
+
+      let companyName = '';
+      let companyUrl = '';
+      let industry = '';
+      let employeeSize = '';
+
+      if (profile.currentPosition && profile.currentPosition.length > 0) {
+        const currentPos = profile.currentPosition[0];
+        companyName = currentPos.companyName || '';
+        companyUrl = currentPos.companyLinkedinUrl || '';
+        industry = currentPos.industry || '';
+      }
+
+      if (profile.company) {
+        employeeSize = profile.company.staffCount || profile.company.employeeCount || '';
+      }
+
+      if (employeeSize && !isNaN(employeeSize)) {
+        employeeSize = this._formatEmployeeCount(parseInt(employeeSize));
+      }
+
+      logger.info('Profile enriched successfully', {
+        profileUrl,
+        name: `${profile.firstName} ${profile.lastName}`,
+        company: companyName
+      });
 
       return {
-        fullName: profile.fullName || profile.name || 'Unknown',
-        headline: profile.headline || profile.title || '',
-        company: profile.company || profile.currentCompany || '',
-        location: profile.location || profile.geo || ''
+        fullName: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || 'Unknown',
+        jobTitle,
+        location,
+        linkedinUrl: profile.linkedinUrl || profileUrl,
+        connectionsCount: profile.connectionsCount || 0,
+        followerCount: profile.followerCount || 0,
+        companyName,
+        industry,
+        employeeSize,
+        companyLinkedinUrl: companyUrl
       };
 
     } catch (error) {
-      logger.error('Error enriching profile', { error: error.message, profileUrl });
-      throw new Error(`Failed to enrich profile: ${error.message}`);
+      logger.error('Error enriching profile', { error: error.message, stack: error.stack, profileUrl });
+
+      return {
+        fullName: 'Unknown',
+        jobTitle: '',
+        location: '',
+        linkedinUrl: profileUrl,
+        connectionsCount: 0,
+        followerCount: 0,
+        companyName: '',
+        industry: '',
+        employeeSize: '',
+        companyLinkedinUrl: ''
+      };
     }
   }
 
+  _formatEmployeeCount(count) {
+    if (!count) return '';
+    const num = parseInt(count);
+    if (isNaN(num)) return count;
+    if (num <= 10) return '1-10 employees';
+    if (num <= 50) return '11-50 employees';
+    if (num <= 200) return '51-200 employees';
+    if (num <= 500) return '201-500 employees';
+    if (num <= 1000) return '501-1000 employees';
+    if (num <= 5000) return '1001-5000 employees';
+    if (num <= 10000) return '5001-10000 employees';
+    return '10000+ employees';
+  }
+
   _mapReactionType(reactionType) {
+    if (!reactionType) return 'Like';
     const mapping = {
       'LIKE': 'Like',
       'PRAISE': 'Love',
       'EMPATHY': 'Insightful',
       'APPRECIATION': 'Celebrate',
       'INTEREST': 'Curious',
-      'SUPPORT': 'Support'
+      'SUPPORT': 'Support',
+      'FUNNY': 'Funny'
     };
-
     const upper = String(reactionType).toUpperCase();
     return mapping[upper] || reactionType;
   }
