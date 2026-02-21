@@ -345,10 +345,43 @@ class ApifyService {
       const profile = items[0];
 
       let jobTitle = '';
+      let companyName = '';
+      let companyUrl = '';
+      let companyId = null;
+
+      // PRIORITY 1: experience array has correct slug-format URLs
       if (profile.experience && profile.experience.length > 0) {
-        jobTitle = profile.experience[0].position || profile.headline || '';
-      } else {
+        const currentRole = profile.experience[0];
+        jobTitle = currentRole.position || profile.headline || '';
+        companyName = currentRole.companyName || '';
+        companyUrl = currentRole.companyLinkedinUrl || '';
+        companyId = currentRole.companyId || null;
+
+        logger.info('Extracted company from experience', {
+          companyName,
+          companyUrl,
+          format: companyUrl.includes('/company/')
+            ? (companyUrl.match(/\/company\/([^\/]+)/)?.[1]?.match(/^\d+$/) ? 'ID' : 'SLUG')
+            : 'UNKNOWN'
+        });
+      }
+      // FALLBACK: currentPosition may have numeric ID instead of slug
+      else if (profile.currentPosition && profile.currentPosition.length > 0) {
+        const currentPos = profile.currentPosition[0];
         jobTitle = profile.headline || '';
+        companyName = currentPos.companyName || '';
+        companyUrl = currentPos.companyLinkedinUrl || '';
+        companyId = currentPos.companyId || null;
+
+        logger.warn('Using currentPosition fallback (may have ID instead of slug)', {
+          companyName,
+          companyUrl
+        });
+      }
+      // FINAL FALLBACK
+      else {
+        jobTitle = profile.headline || '';
+        logger.warn('No experience or currentPosition found', { profileUrl });
       }
 
       let location = '';
@@ -356,22 +389,18 @@ class ApifyService {
         location = profile.location.parsed?.text || profile.location.linkedinText || '';
       }
 
-      let companyName = '';
-      let companyUrl = '';
-      let companyId = null;
-
-      if (profile.currentPosition && profile.currentPosition.length > 0) {
-        const currentPos = profile.currentPosition[0];
-        companyName = currentPos.companyName || '';
-        companyUrl = currentPos.companyLinkedinUrl || '';
-        companyId = currentPos.companyId || null;
-      }
+      // Only trigger company enrichment if URL has a slug (not a bare numeric ID)
+      const hasValidCompanyUrl = companyUrl &&
+        companyUrl.includes('/company/') &&
+        !companyUrl.match(/\/company\/\d+\/?$/);
 
       logger.info('Profile enriched', {
         profileUrl,
         name: `${profile.firstName} ${profile.lastName}`,
         company: companyName,
-        hasCompanyUrl: !!companyUrl
+        hasCompanyUrl: !!companyUrl,
+        companyUrlFormat: hasValidCompanyUrl ? 'SLUG' : 'ID_OR_MISSING',
+        willEnrichCompany: hasValidCompanyUrl
       });
 
       return {
@@ -384,7 +413,7 @@ class ApifyService {
         companyName,
         companyLinkedinUrl: companyUrl,
         companyId,
-        needsCompanyEnrichment: !!companyUrl
+        needsCompanyEnrichment: hasValidCompanyUrl
       };
 
     } catch (error) {
