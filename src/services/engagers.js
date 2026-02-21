@@ -3,16 +3,7 @@ const logger = require('../utils/logger');
 
 class EngagersService {
   /**
-   * HYBRID APPROACH: Profile + Selective Company Enrichment
-   * - Enriches ALL profiles (person data)
-   * - Only enriches companies when profile has company URL
-   * - Optimized with parallel batch processing
-   * 
-   * @param {string} postUrl - LinkedIn post URL
-   * @param {string[]} engagementTypes - Array of engagement types
-   * @param {number} limitPerType - Max engagers per type
-   * @param {function} onProgress - Progress callback
-   * @returns {object} Complete enriched data
+   * HYBRID APPROACH with ROBUST ERROR HANDLING
    */
   async scanPostEngagers(postUrl, engagementTypes, limitPerType, onProgress) {
     logger.info('Starting HYBRID enrichment scan', { postUrl, engagementTypes, limitPerType });
@@ -24,11 +15,7 @@ class EngagersService {
     let companiesEnriched = 0;
 
     try {
-      // ==========================================
-      // PHASE 1: SCRAPE ENGAGEMENTS (Fast - 1 min)
-      // ==========================================
-
-      // Step 1A: Scrape reactions
+      // PHASE 1: SCRAPE ENGAGEMENTS
       const reactionTypes = engagementTypes.filter(t => t !== 'comment');
       
       if (reactionTypes.length > 0) {
@@ -37,11 +24,15 @@ class EngagersService {
         const reactions = await apifyService.scrapePostReactions(postUrl, limitPerType);
         reactionsScraped = reactions.length;
         
-        allEngagers.push(...reactions.map(r => ({
-          linkedin_url: r.profileUrl,
-          reaction_type: r.reactionType,
-          comment_text: null
-        })));
+        // ADDED: Filter out invalid profiles
+        allEngagers.push(...reactions
+          .filter(r => r.profileUrl && r.profileUrl.trim())  // ← SAFETY CHECK
+          .map(r => ({
+            linkedin_url: r.profileUrl,
+            reaction_type: r.reactionType || 'Like',  // ← DEFAULT VALUE
+            comment_text: null
+          }))
+        );
 
         onProgress?.({
           reactions_scraped: reactionsScraped,
@@ -51,21 +42,24 @@ class EngagersService {
           total: reactionsScraped
         });
 
-        logger.info('Reactions scraped', { count: reactionsScraped });
+        logger.info('Reactions scraped', { count: reactionsScraped, valid: allEngagers.length });
       }
 
-      // Step 1B: Scrape comments
       if (engagementTypes.includes('comment')) {
         logger.info('Scraping comments', { limit: limitPerType });
         
         const comments = await apifyService.scrapePostComments(postUrl, limitPerType);
         commentsScraped = comments.length;
         
-        allEngagers.push(...comments.map(c => ({
-          linkedin_url: c.profileUrl,
-          reaction_type: 'Comment',
-          comment_text: c.commentText
-        })));
+        // ADDED: Filter out invalid profiles
+        allEngagers.push(...comments
+          .filter(c => c.profileUrl && c.profileUrl.trim())  // ← SAFETY CHECK
+          .map(c => ({
+            linkedin_url: c.profileUrl,
+            reaction_type: 'Comment',
+            comment_text: c.commentText || ''
+          }))
+        );
 
         onProgress?.({
           reactions_scraped: reactionsScraped,
@@ -78,7 +72,7 @@ class EngagersService {
         logger.info('Comments scraped', { count: commentsScraped });
       }
 
-      // Step 1C: Deduplicate
+      // Deduplicate with SAFE error handling
       const uniqueEngagers = this._deduplicateEngagers(allEngagers);
       logger.info('Deduplicated engagers', { 
         total: allEngagers.length,
@@ -86,10 +80,7 @@ class EngagersService {
         duplicates: allEngagers.length - uniqueEngagers.length
       });
 
-      // ==========================================
-      // PHASE 2: ENRICH PROFILES (Parallel - 1.5 min)
-      // ==========================================
-
+      // PHASE 2: ENRICH PROFILES
       const engagersToEnrich = uniqueEngagers.slice(0, limitPerType);
       const profileEnrichedData = [];
 
@@ -156,19 +147,14 @@ class EngagersService {
         total: engagersToEnrich.length 
       });
 
-      // ==========================================
-      // PHASE 3: SELECTIVE COMPANY ENRICHMENT (Parallel - 1 min)
-      // ==========================================
-
-      // Extract unique companies that need enrichment
+      // PHASE 3: SELECTIVE COMPANY ENRICHMENT
       const uniqueCompanies = this._extractUniqueCompanies(profileEnrichedData);
       
       logger.info('Starting SELECTIVE company enrichment', {
-        totalCompanies: uniqueCompanies.length,
-        profilesWithCompany: profileEnrichedData.filter(p => p.profileData?.needsCompanyEnrichment).length
+        totalCompanies: uniqueCompanies.length
       });
 
-      const companyDataMap = new Map();  // companyUrl → company data
+      const companyDataMap = new Map();
 
       if (uniqueCompanies.length > 0) {
         const companyBatches = this._chunkArray(uniqueCompanies, BATCH_SIZE);
@@ -225,12 +211,8 @@ class EngagersService {
         total: uniqueCompanies.length
       });
 
-      // ==========================================
       // PHASE 4: COMBINE ALL DATA
-      // ==========================================
-
       const fullyEnrichedEngagers = profileEnrichedData.map(({ engager, profileData }) => {
-        // Get company data if available
         let companyData = {
           industry: '',
           employeeSize: '',
@@ -245,36 +227,29 @@ class EngagersService {
         }
 
         return {
-          // Personal Data (6 fields)
           name: profileData?.fullName || 'Unknown',
           job_title: profileData?.jobTitle || '',
           location: profileData?.location || '',
           linkedin_url: profileData?.linkedinUrl || engager.linkedin_url,
           total_connections: profileData?.connectionsCount || 0,
           follower_count: profileData?.followerCount || 0,
-          
-          // Company Data (5 fields) ← NOW INCLUDING COMPANY LOCATION
           company_name: profileData?.companyName || '',
           industry: companyData.industry || '',
           employee_size: companyData.employeeSize || '',
-          company_location: companyData.companyLocation || '',  // NEW!
+          company_location: companyData.companyLocation || '',
           company_profile_url: profileData?.companyLinkedinUrl || '',
-          
-          // Engagement Data
           reaction_type: engager.reaction_type,
           comment_text: engager.comment_text || null
         };
       });
 
-      // Step 5: Generate CSV
       const csv = this._generateCSV(fullyEnrichedEngagers);
 
       logger.info('HYBRID enrichment scan completed', {
         totalEngagers: fullyEnrichedEngagers.length,
         uniqueProfiles: uniqueEngagers.length,
         profilesEnriched: profilesEnriched,
-        companiesEnriched: companiesEnriched,
-        successRate: `${Math.round((profilesEnriched / engagersToEnrich.length) * 100)}%`
+        companiesEnriched: companiesEnriched
       });
 
       return {
@@ -295,7 +270,7 @@ class EngagersService {
   }
 
   /**
-   * Extract unique company URLs that need enrichment
+   * Extract unique company URLs
    * @private
    */
   _extractUniqueCompanies(profileEnrichedData) {
@@ -323,34 +298,52 @@ class EngagersService {
   }
 
   /**
-   * Deduplicate engagers by LinkedIn URL
+   * Deduplicate engagers - SAFE VERSION
+   * @private
    */
   _deduplicateEngagers(engagers) {
     const seen = new Map();
 
     for (const engager of engagers) {
-      const normalizedUrl = engager.linkedin_url
-        .split('?')[0]
-        .replace(/\/$/, '')
-        .toLowerCase()
-        .trim();
+      // ADDED: Skip if no URL
+      if (!engager.linkedin_url) {
+        logger.warn('Skipping engager with no URL', { engager });
+        continue;
+      }
 
-      if (!seen.has(normalizedUrl)) {
-        seen.set(normalizedUrl, {
-          ...engager,
-          linkedin_url: engager.linkedin_url
+      try {
+        const normalizedUrl = engager.linkedin_url
+          .split('?')[0]
+          .replace(/\/$/, '')
+          .toLowerCase()
+          .trim();
+
+        if (!seen.has(normalizedUrl)) {
+          seen.set(normalizedUrl, {
+            ...engager,
+            linkedin_url: engager.linkedin_url,
+            reaction_type: engager.reaction_type || 'Unknown'  // ← DEFAULT VALUE
+          });
+        } else {
+          const existing = seen.get(normalizedUrl);
+          
+          // ADDED: Safe split with fallback
+          const existingTypes = (existing.reaction_type || 'Unknown').split(', ');
+          const newType = engager.reaction_type || 'Unknown';
+          
+          if (!existingTypes.includes(newType)) {
+            existing.reaction_type = [...existingTypes, newType].join(', ');
+          }
+          
+          if (engager.comment_text && !existing.comment_text) {
+            existing.comment_text = engager.comment_text;
+          }
+        }
+      } catch (error) {
+        logger.error('Error deduplicating engager', {
+          error: error.message,
+          engager: engager
         });
-      } else {
-        const existing = seen.get(normalizedUrl);
-        const existingTypes = existing.reaction_type.split(', ');
-        
-        if (!existingTypes.includes(engager.reaction_type)) {
-          existing.reaction_type = [...existingTypes, engager.reaction_type].join(', ');
-        }
-        
-        if (engager.comment_text && !existing.comment_text) {
-          existing.comment_text = engager.comment_text;
-        }
       }
     }
 
@@ -358,7 +351,7 @@ class EngagersService {
   }
 
   /**
-   * Generate CSV with ALL 11 fields (added company location)
+   * Generate CSV with ALL 11 fields
    */
   _generateCSV(engagers) {
     const headers = [
@@ -371,7 +364,7 @@ class EngagersService {
       'Follower Count',
       'Company Name',
       'Employee Size',
-      'Company Location',  // NEW!
+      'Company Location',
       'Company Profile URL',
       'Reaction Type'
     ];
@@ -386,7 +379,7 @@ class EngagersService {
       e.follower_count || 0,
       this._escapeCsvValue(e.company_name),
       this._escapeCsvValue(e.employee_size),
-      this._escapeCsvValue(e.company_location),  // NEW!
+      this._escapeCsvValue(e.company_location),
       e.company_profile_url || '',
       this._escapeCsvValue(e.reaction_type)
     ]);
