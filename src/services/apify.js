@@ -409,7 +409,7 @@ class ApifyService {
     try {
       logger.info('Enriching company', { companyUrl });
 
-      const items = await this._runActor('harvestapi/linkedin-company-scraper', {
+      const items = await this._runActor('harvestapi/linkedin-company', {
         companiesUrls: [companyUrl]
       });
 
