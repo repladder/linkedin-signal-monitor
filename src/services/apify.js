@@ -285,11 +285,13 @@ class ApifyService {
     try {
       logger.info('Scraping post reactions', { postUrl, maxReactions });
 
-      const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', {
+      const actorInput = {
         max_reactions: maxReactions,
         post_urls: [postUrl],
         reaction_type: 'ALL'
-      });
+      };
+      logger.info('Apify actor input:', actorInput);
+      const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', actorInput);
 
       logger.info('Post reactions scraped', { count: items.length, postUrl });
 
