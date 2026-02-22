@@ -283,25 +283,78 @@ class ApifyService {
 
   async scrapePostReactions(postUrl, maxReactions = 100) {
     try {
-      logger.info('Scraping post reactions', { postUrl, maxReactions });
+      console.log('═══════════════════════════════════════');
+      console.log('🔍 SCRAPING POST REACTIONS');
+      console.log('═══════════════════════════════════════');
+      console.log('📍 Post URL:', postUrl);
+      console.log('📊 Max Reactions:', maxReactions);
 
       const actorInput = {
         max_reactions: maxReactions,
         post_urls: [postUrl],
-        reaction_type: 'ALL'
+        reaction_type: "ALL"
       };
-      logger.info('Apify actor input:', actorInput);
-      const items = await this._runActor('datadoping/linkedin-post-reactions-scraper-no-cookie', actorInput);
 
-      logger.info('Post reactions scraped', { count: items.length, postUrl });
+      console.log('📤 Actor Input:', JSON.stringify(actorInput, null, 2));
+      console.log('🎯 Actor ID: datadoping/linkedin-post-reactions-scraper-no-cookie');
 
-      return items.map(item => ({
+      const actorId = 'datadoping/linkedin-post-reactions-scraper-no-cookie';
+      const actorIdForUrl = actorId.replace('/', '~');
+      const startUrl = `${APIFY_API_BASE}/acts/${actorIdForUrl}/runs?token=${this.token}`;
+
+      const startResponse = await axios.post(startUrl, actorInput, {
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      const runId = startResponse.data.data.id;
+      console.log('✅ Actor run started:', runId);
+
+      const runResult = await this._pollRunStatus(runId);
+      console.log('✅ Actor run completed:', runResult.id);
+      console.log('📦 Default dataset ID:', runResult.defaultDatasetId);
+
+      const datasetUrl = `${APIFY_API_BASE}/datasets/${runResult.defaultDatasetId}/items?token=${this.token}`;
+      const datasetResponse = await axios.get(datasetUrl);
+      const items = datasetResponse.data;
+
+      console.log('📊 Items returned:', items.length);
+
+      if (items.length > 0) {
+        console.log('📋 First item sample:', JSON.stringify(items[0], null, 2));
+      }
+
+      const transformed = items.map(item => ({
         profileUrl: item.reactor?.profile_url || item.reactor_profile_url,
-        reactionType: this._mapReactionType(item.reaction_type)
+        name: item.reactor?.name || item.reactor_name || 'Unknown',
+        headline: item.reactor?.headline || '',
+        reactionType: this._mapReactionType(item.reaction_type),
+        timestamp: item.createdAt || new Date().toISOString()
       }));
 
+      console.log('✅ Post reactions scraped successfully');
+      console.log('═══════════════════════════════════════\n');
+
+      return transformed;
+
     } catch (error) {
-      logger.error('Error scraping post reactions', { error: error.message, stack: error.stack, postUrl });
+      console.error('═══════════════════════════════════════');
+      console.error('❌ ERROR SCRAPING POST REACTIONS');
+      console.error('═══════════════════════════════════════');
+      console.error('📍 Post URL:', postUrl);
+      console.error('💥 Error Message:', error.message);
+      console.error('📚 Error Stack:', error.stack);
+
+      if (error.response) {
+        console.error('📡 Response Status:', error.response.status);
+        console.error('📡 Response Data:', JSON.stringify(error.response.data, null, 2));
+      }
+
+      if (error.statusCode) {
+        console.error('🔢 Status Code:', error.statusCode);
+      }
+
+      console.error('═══════════════════════════════════════\n');
+
       throw new Error(`Failed to scrape reactions: ${error.message}`);
     }
   }
