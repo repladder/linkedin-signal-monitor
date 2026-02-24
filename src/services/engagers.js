@@ -255,7 +255,7 @@ class EngagersService {
       return {
         engagers: fullyEnrichedEngagers,
         uniqueProfiles: uniqueEngagers.length,
-        profilesEnriched: profilesEnriched,
+        profilesEnriched: fullyEnrichedEngagers.length,
         companiesEnriched: companiesEnriched,
         csv
       };
