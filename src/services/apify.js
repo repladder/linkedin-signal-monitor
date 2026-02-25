@@ -536,7 +536,7 @@ class ApifyService {
       });
 
       return {
-        industry: company.industry || company.industries?.[0] || '',
+        industry: company.industry?.name || company.industry?.title || company.industries?.[0]?.name || company.industries?.[0] || '',
         employeeSize,
         companyLocation,
         companyName: company.name || '',
