@@ -406,6 +406,152 @@ class EngagersService {
     
     return stringValue;
   }
+
+  async saveToSupabase(userId, scanId, scanData, engagersData) {
+    try {
+      const { supabase } = require('../config/supabase');
+
+      logger.info('Saving scan to Supabase', { scanId, userId });
+
+      // Insert or update scan record
+      const { data: scan, error: scanError } = await supabase
+        .from('engager_scans')
+        .upsert({
+          id: scanId,
+          user_id: userId,
+          post_url: scanData.postUrl,
+          status: 'completed',
+          total_engagers: engagersData.engagers.length,
+          unique_profiles: engagersData.uniqueProfiles,
+          profiles_enriched: engagersData.profilesEnriched,
+          companies_enriched: engagersData.companiesEnriched,
+          engagement_types: scanData.engagementTypes,
+          limit_per_type: scanData.limitPerType,
+          completed_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (scanError) {
+        logger.error('Error saving scan to Supabase', { error: scanError });
+        throw scanError;
+      }
+
+      // Insert engagers in batches (500 at a time)
+      const BATCH_SIZE = 500;
+      const engagerRecords = engagersData.engagers.map(e => ({
+        scan_id: scanId,
+        user_id: userId,
+        name: e.name,
+        job_title: e.job_title,
+        linkedin_url: e.linkedin_url,
+        location: e.location,
+        total_connections: e.total_connections,
+        follower_count: e.follower_count,
+        company_name: e.company_name,
+        industry: e.industry,
+        employee_size: e.employee_size,
+        company_location: e.company_location,
+        company_profile_url: e.company_profile_url,
+        reaction_type: e.reaction_type,
+        comment_text: e.comment_text
+      }));
+
+      for (let i = 0; i < engagerRecords.length; i += BATCH_SIZE) {
+        const batch = engagerRecords.slice(i, i + BATCH_SIZE);
+
+        const { error: engagersError } = await supabase
+          .from('engagers')
+          .upsert(batch, {
+            onConflict: 'scan_id,linkedin_url',
+            ignoreDuplicates: false
+          });
+
+        if (engagersError) {
+          logger.error('Error saving engagers batch', { error: engagersError });
+          throw engagersError;
+        }
+
+        logger.info('Saved engagers batch', { batch: i / BATCH_SIZE + 1, count: batch.length });
+      }
+
+      logger.info('Successfully saved scan to Supabase', { scanId, engagersCount: engagerRecords.length });
+      return { success: true, scan };
+
+    } catch (error) {
+      logger.error('Error in saveToSupabase', { error: error.message });
+      throw error;
+    }
+  }
+
+  async getFromSupabase(userId, scanId) {
+    try {
+      const { supabase } = require('../config/supabase');
+
+      logger.info('Fetching scan from Supabase', { scanId, userId });
+
+      const { data: scan, error: scanError } = await supabase
+        .from('engager_scans')
+        .select('*')
+        .eq('id', scanId)
+        .eq('user_id', userId)
+        .single();
+
+      if (scanError || !scan) {
+        throw new Error('Scan not found');
+      }
+
+      const { data: engagers, error: engagersError } = await supabase
+        .from('engagers')
+        .select('*')
+        .eq('scan_id', scanId)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (engagersError) {
+        throw engagersError;
+      }
+
+      return {
+        success: true,
+        scan_id: scan.id,
+        post_url: scan.post_url,
+        status: scan.status,
+        total_engagers: scan.total_engagers,
+        unique_profiles: scan.unique_profiles,
+        profiles_enriched: scan.profiles_enriched,
+        companies_enriched: scan.companies_enriched,
+        engagers: engagers || []
+      };
+
+    } catch (error) {
+      logger.error('Error in getFromSupabase', { error: error.message });
+      throw error;
+    }
+  }
+
+  async listScans(userId, limit = 50, offset = 0) {
+    try {
+      const { supabase } = require('../config/supabase');
+
+      const { data: scans, error } = await supabase
+        .from('engager_scans')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) {
+        throw error;
+      }
+
+      return { success: true, scans: scans || [] };
+
+    } catch (error) {
+      logger.error('Error in listScans', { error: error.message });
+      throw error;
+    }
+  }
 }
 
 module.exports = new EngagersService();

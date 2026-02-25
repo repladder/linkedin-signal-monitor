@@ -6,9 +6,6 @@ const logger = require('../utils/logger');
 const engagersService = require('../services/engagers');
 const { v4: uuidv4 } = require('uuid');
 
-// In-memory storage for temporary scan results (cleared after 1 hour)
-const scanResults = new Map();
-
 /**
  * Safely convert any value to a string for frontend display
  */
@@ -55,17 +52,6 @@ function flattenEngagerData(engager) {
   };
 }
 
-// Cleanup old scans every hour
-setInterval(() => {
-  const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  for (const [scanId, data] of scanResults.entries()) {
-    if (data.timestamp < oneHourAgo) {
-      scanResults.delete(scanId);
-      logger.info('Cleaned up old scan', { scanId });
-    }
-  }
-}, 60 * 60 * 1000);
-
 // POST /engagers/scan - Start a new engager scan
 router.post(
   '/scan',
@@ -87,27 +73,32 @@ router.post(
 
     try {
       const { post_url, engagement_types, limit_per_type } = req.body;
+      const userId = req.user.id;
       const scanId = uuidv4();
 
       logger.info('Starting engager scan', {
         scanId,
-        userId: req.user.id,
+        userId,
         postUrl: post_url,
         engagementTypes: engagement_types,
         limit: limit_per_type
       });
 
-      // Initialize scan status
-      scanResults.set(scanId, {
+      // Create initial scan record in Supabase
+      const { supabase } = require('../config/supabase');
+      const { error: insertError } = await supabase.from('engager_scans').insert({
+        id: scanId,
+        user_id: userId,
+        post_url: post_url,
         status: 'processing',
-        progress: {
-          reactions_scraped: 0,
-          comments_scraped: 0,
-          profiles_enriched: 0,
-          total: 0
-        },
-        timestamp: Date.now()
+        engagement_types: engagement_types,
+        limit_per_type: limit_per_type || 10
       });
+
+      if (insertError) {
+        logger.error('Failed to create scan record', { error: insertError });
+        return res.status(500).json({ success: false, error: 'Failed to create scan record' });
+      }
 
       // Send immediate response with scan ID
       res.status(202).json({
@@ -119,31 +110,27 @@ router.post(
       // Process scan in background
       setImmediate(async () => {
         try {
-          // Scan engagers
+          const onProgress = async (progress) => {
+            await supabase.from('engager_scans').update({
+              total_engagers: progress.total || 0,
+              profiles_enriched: progress.profiles_enriched || 0,
+              companies_enriched: progress.companies_enriched || 0
+            }).eq('id', scanId);
+          };
+
           const result = await engagersService.scanPostEngagers(
             post_url,
             engagement_types,
             limit_per_type,
-            (progress) => {
-              // Update progress
-              const scanData = scanResults.get(scanId);
-              if (scanData) {
-                scanData.progress = progress;
-              }
-            }
+            onProgress
           );
 
-          // Store results
-          scanResults.set(scanId, {
-            status: 'completed',
-            post_url,
-            engagement_types,
-            total_engagers: result.engagers.length,
-            unique_profiles: result.uniqueProfiles,
-            engagers: result.engagers,
-            csv_data: result.csv,
-            timestamp: Date.now()
-          });
+          // Save complete results to Supabase
+          await engagersService.saveToSupabase(userId, scanId, {
+            postUrl: post_url,
+            engagementTypes: engagement_types,
+            limitPerType: limit_per_type || 10
+          }, result);
 
           logger.info('Engager scan completed', {
             scanId,
@@ -158,11 +145,11 @@ router.post(
             stack: error.stack
           });
 
-          scanResults.set(scanId, {
+          const { supabase } = require('../config/supabase');
+          await supabase.from('engager_scans').update({
             status: 'failed',
-            error: error.message,
-            timestamp: Date.now()
-          });
+            error_message: error.message
+          }).eq('id', scanId);
         }
       });
 
@@ -179,28 +166,31 @@ router.post(
 // GET /engagers/scan/:id/status - Get scan status and progress
 router.get('/scan/:id/status', authenticateApiKey, async (req, res) => {
   try {
-    const { id } = req.params;
-    const scanData = scanResults.get(id);
+    const { id: scanId } = req.params;
+    const userId = req.user.id;
 
-    if (!scanData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Scan not found or expired'
-      });
+    const { supabase } = require('../config/supabase');
+    const { data: scan, error } = await supabase
+      .from('engager_scans')
+      .select('id, status, total_engagers, profiles_enriched, companies_enriched, error_message')
+      .eq('id', scanId)
+      .eq('user_id', userId)
+      .single();
+
+    if (error || !scan) {
+      return res.status(404).json({ success: false, error: 'Scan not found' });
     }
 
     res.json({
       success: true,
-      scan_id: id,
-      status: scanData.status,
-      progress: scanData.progress,
-      ...(scanData.status === 'completed' && {
-        total_engagers: scanData.total_engagers,
-        unique_profiles: scanData.unique_profiles
-      }),
-      ...(scanData.status === 'failed' && {
-        error: scanData.error
-      })
+      scan_id: scanId,
+      status: scan.status,
+      progress: {
+        total: scan.total_engagers || 0,
+        profiles_enriched: scan.profiles_enriched || 0,
+        companies_enriched: scan.companies_enriched || 0
+      },
+      ...(scan.status === 'failed' && { error: scan.error_message })
     });
 
   } catch (error) {
@@ -215,35 +205,21 @@ router.get('/scan/:id/status', authenticateApiKey, async (req, res) => {
 // GET /engagers/scan/:id/results - Get scan results (for display in UI)
 router.get('/scan/:id/results', authenticateApiKey, async (req, res) => {
   try {
-    const { id } = req.params;
-    const scanData = scanResults.get(id);
+    const { id: scanId } = req.params;
+    const userId = req.user.id;
 
-    if (!scanData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Scan not found or expired'
-      });
-    }
-
-    if (scanData.status !== 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: `Scan is ${scanData.status}. Results not available yet.`
-      });
-    }
-
-    // Flatten all engager data before sending to frontend
-    const flattenedEngagers = (scanData.engagers || []).map(flattenEngagerData);
+    const result = await engagersService.getFromSupabase(userId, scanId);
+    const flattenedEngagers = result.engagers.map(flattenEngagerData);
 
     res.json({
       success: true,
-      scan_id: id,
-      post_url: scanData.post_url,
-      engagement_types: scanData.engagement_types,
-      total_engagers: scanData.total_engagers || flattenedEngagers.length,
-      unique_profiles: scanData.unique_profiles || flattenedEngagers.length,
-      profiles_enriched: scanData.profiles_enriched || 0,
-      companies_enriched: scanData.companies_enriched || 0,
+      scan_id: result.scan_id,
+      post_url: result.post_url,
+      status: result.status,
+      total_engagers: result.total_engagers,
+      unique_profiles: result.unique_profiles,
+      profiles_enriched: result.profiles_enriched,
+      companies_enriched: result.companies_enriched,
       engagers: flattenedEngagers
     });
 
@@ -259,29 +235,25 @@ router.get('/scan/:id/results', authenticateApiKey, async (req, res) => {
 // GET /engagers/scan/:id/download - Download CSV
 router.get('/scan/:id/download', authenticateApiKey, async (req, res) => {
   try {
-    const { id } = req.params;
-    const scanData = scanResults.get(id);
+    const { id: scanId } = req.params;
+    const userId = req.user.id;
 
-    if (!scanData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Scan not found or expired'
-      });
-    }
+    const result = await engagersService.getFromSupabase(userId, scanId);
 
-    if (scanData.status !== 'completed') {
+    if (result.status !== 'completed') {
       return res.status(400).json({
         success: false,
-        error: `Scan is ${scanData.status}. CSV not available yet.`
+        error: `Scan is ${result.status}. CSV not available yet.`
       });
     }
 
-    // Set headers for CSV download
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="linkedin-engagers-${id}.csv"`);
-    res.send(scanData.csv_data);
+    const csv = engagersService._generateCSV(result.engagers);
 
-    logger.info('CSV downloaded', { scanId: id, userId: req.user.id });
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="linkedin-engagers-${scanId}.csv"`);
+    res.send(csv);
+
+    logger.info('CSV downloaded', { scanId, userId });
 
   } catch (error) {
     logger.error('Error downloading CSV:', error);
@@ -292,28 +264,31 @@ router.get('/scan/:id/download', authenticateApiKey, async (req, res) => {
   }
 });
 
-// GET /engagers/scans - List recent scans (from current session)
+// GET /engagers/scans - List all scans for user
 router.get('/scans', authenticateApiKey, async (req, res) => {
   try {
-    // Get all scans from memory (last hour)
-    const scans = Array.from(scanResults.entries())
-      .map(([id, data]) => ({
-        scan_id: id,
-        post_url: data.post_url || null,
-        status: data.status,
-        total_engagers: data.total_engagers || 0,
-        unique_profiles: data.unique_profiles || 0,
-        timestamp: data.timestamp
-      }))
-      .sort((a, b) => b.timestamp - a.timestamp);
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
 
-    res.json({
-      success: true,
-      scans
-    });
+    const result = await engagersService.listScans(userId, limit, offset);
+
+    const scans = result.scans.map(scan => ({
+      scan_id: scan.id,
+      post_url: scan.post_url,
+      status: scan.status,
+      total_engagers: scan.total_engagers || 0,
+      unique_profiles: scan.unique_profiles || 0,
+      profiles_enriched: scan.profiles_enriched || 0,
+      companies_enriched: scan.companies_enriched || 0,
+      created_at: scan.created_at,
+      completed_at: scan.completed_at
+    }));
+
+    res.json({ success: true, scans });
 
   } catch (error) {
-    logger.error('Error fetching scans:', error);
+    logger.error('Error listing scans:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to fetch scans'
